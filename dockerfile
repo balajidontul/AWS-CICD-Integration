@@ -1,5 +1,3 @@
 FROM eclipse-temurin:26-jdk
 
-COPY build/libs/*.jar app.jar
-
-ENTRYPOINT ["java","-jar","/app.jar"]
+RUN apt-get update && apt-get install -y wget unzip
