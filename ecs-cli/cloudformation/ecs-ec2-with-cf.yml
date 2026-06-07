@@ -1,0 +1,178 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: ECS Cluster using EC2 + Launch Template (Fixed Version)
+
+Parameters:
+
+  EnvironmentName:
+    Type: String
+    Default: my-ecs-env
+
+  InstanceType:
+    Type: String
+    Default: t2.small
+    AllowedValues:
+      - t2.micro
+      - t2.small
+      - t2.medium
+      - t2.large
+      - t3.micro
+      - t3.small
+      - t3.medium
+
+  DesiredCapacity:
+    Type: Number
+    Default: 1
+
+  MaxSize:
+    Type: Number
+    Default: 2
+
+  ECSAMI:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ecs/optimized-ami/amazon-linux-2/recommended/image_id
+
+Resources:
+
+  #########################################
+  # ECS CLUSTER
+  #########################################
+
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub "${EnvironmentName}-ec2"
+
+  #########################################
+  # SECURITY GROUP
+  #########################################
+
+  ContainerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ECS Container Instances SG
+      VpcId:
+        Fn::ImportValue: !Sub "${EnvironmentName}:VpcId"
+
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          CidrIp: 0.0.0.0/0
+
+  #########################################
+  # IAM ROLE
+  #########################################
+
+  ECSInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${EnvironmentName}-ecs-instance-role"
+
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref ECSInstanceRole
+
+  #########################################
+  # LAUNCH TEMPLATE (CORRECT)
+  #########################################
+
+  ContainerLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        ImageId: !Ref ECSAMI
+        InstanceType: !Ref InstanceType
+
+        IamInstanceProfile:
+          Arn: !GetAtt EC2InstanceProfile.Arn
+
+        SecurityGroupIds:
+          - !Ref ContainerSecurityGroup
+
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            echo "ECS_CLUSTER=${ECSCluster}" >> /etc/ecs/ecs.config
+
+  #########################################
+  # AUTO SCALING GROUP
+  #########################################
+
+  ECSAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+        - Fn::ImportValue: !Sub "${EnvironmentName}:PublicSubnetOne"
+        - Fn::ImportValue: !Sub "${EnvironmentName}:PublicSubnetTwo"
+
+      MinSize: 1
+      MaxSize: !Ref MaxSize
+      DesiredCapacity: !Ref DesiredCapacity
+
+      LaunchTemplate:
+        LaunchTemplateId: !Ref ContainerLaunchTemplate
+        Version: !GetAtt ContainerLaunchTemplate.LatestVersionNumber
+
+  #########################################
+  # ECS CAPACITY PROVIDER
+  #########################################
+
+  ECSCapacityProvider:
+    Type: AWS::ECS::CapacityProvider
+    Properties:
+      Name: !Sub "${EnvironmentName}-capacity-provider"
+
+      AutoScalingGroupProvider:
+        AutoScalingGroupArn: !Ref ECSAutoScalingGroup
+
+        ManagedScaling:
+          Status: ENABLED
+          TargetCapacity: 100
+
+        ManagedTerminationProtection: DISABLED
+
+  #########################################
+  # ASSOCIATE CAPACITY PROVIDER
+  #########################################
+
+  ECSClusterCapacityProviderAssociation:
+    Type: AWS::ECS::ClusterCapacityProviderAssociations
+    Properties:
+      Cluster: !Ref ECSCluster
+
+      CapacityProviders:
+        - !Ref ECSCapacityProvider
+
+      DefaultCapacityProviderStrategy:
+        - CapacityProvider: !Ref ECSCapacityProvider
+          Weight: 1
+
+#########################################
+# OUTPUT
+#########################################
+
+Outputs:
+  ClusterName:
+    Value: !Ref ECSCluster
+    Export:
+      Name: !Sub "${EnvironmentName}:ClusterName"
